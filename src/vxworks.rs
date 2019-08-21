@@ -7,27 +7,29 @@
 // except according to those terms.
 
 //! Implementation for VxWorks
-use crate::error::{Error, ERRNO_NOT_POSITIVE};
-use core::num::NonZeroU32;
+use crate::error::{Error, RAND_SECURE_FATAL};
+use crate::util_libc::last_os_error;
+use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
-extern "C" {
-    fn randBytes(buf: *mut u8, length: i32) -> i32;
-    // errnoLib.h
-    fn errnoGet() -> i32;
-}
+static RNG_INIT: AtomicBool = AtomicBool::new(false);
 
 pub fn getrandom_inner(dest: &mut [u8]) -> Result<(), Error> {
+    while !RNG_INIT.load(Relaxed) {
+        let ret = unsafe { libc::randSecure() };
+        if ret < 0 {
+            return Err(RAND_SECURE_FATAL);
+        } else if ret > 0 {
+            RNG_INIT.store(true, Relaxed);
+            break;
+        }
+        unsafe { libc::usleep(10) };
+    }
+
     // Prevent overflow of i32
     for chunk in dest.chunks_mut(i32::max_value() as usize) {
-        let ret = unsafe { randBytes(chunk.as_mut_ptr(), chunk.len() as i32) };
-        if ret == -1 {
-            let errno = unsafe { errnoGet() };
-            let err = if errno > 0 {
-                Error::from(NonZeroU32::new(errno as u32).unwrap())
-            } else {
-                ERRNO_NOT_POSITIVE
-            };
-            return Err(err);
+        let ret = unsafe { libc::randABytes(chunk.as_mut_ptr(), chunk.len() as i32) };
+        if ret != 0 {
+            return Err(last_os_error());
         }
     }
     Ok(())
